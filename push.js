@@ -15,17 +15,44 @@ import {
 const VAPID_KEY =
   "BDiJmkevr_HPOjJdEQk9tySWP16bObFiQ8le8oOZVOQ7p89KzrPr_JYLLPz3VqJrErTfnWVH9HKpnCL9xtO4Pus";
 
+// Wait for firebase-boot.js
+async function waitForFirebase(timeout = 15000) {
+  if (window.CPS_FIREBASE?.db) {
+    return window.CPS_FIREBASE;
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error("Firebase did not initialize. Check firebase-boot.js."));
+    }, timeout);
+
+    window.addEventListener(
+      "cps-boot-ready",
+      () => {
+        clearTimeout(timer);
+
+        if (window.CPS_FIREBASE?.db) {
+          resolve(window.CPS_FIREBASE);
+        } else {
+          reject(new Error("Firebase database is unavailable."));
+        }
+      },
+      { once: true }
+    );
+  });
+}
+
 let messaging = null;
 let messageListenerAdded = false;
 
 async function enablePush() {
   try {
-    if (!window.CPS_FIREBASE) {
-      alert("Firebase is not ready. Refresh the page and try again.");
-      return;
-    }
+    const firebase = await waitForFirebase();
 
-    if (!("Notification" in window) || !("serviceWorker" in navigator)) {
+    if (
+      !("Notification" in window) ||
+      !("serviceWorker" in navigator)
+    ) {
       alert("This browser does not support push notifications.");
       return;
     }
@@ -58,24 +85,22 @@ async function enablePush() {
     }
 
     if (!/^[A-Za-z0-9_-]+$/.test(VAPID_KEY)) {
-      alert("Invalid VAPID key. Copy it again from Firebase Console.");
+      alert("Invalid VAPID key. Verify it in Firebase Console.");
       return;
     }
 
     const permission = await Notification.requestPermission();
 
     if (permission !== "granted") {
-      alert("Please allow notifications in your browser settings.");
+      alert("Please allow notifications.");
       return;
     }
 
     const registration = await navigator.serviceWorker.register(
-      "/firebase-messaging-sw.js"
+      "firebase-messaging-sw.js"
     );
 
     await navigator.serviceWorker.ready;
-
-    const { db } = window.CPS_FIREBASE;
 
     messaging = getMessaging();
 
@@ -89,12 +114,10 @@ async function enablePush() {
       return;
     }
 
-    // Store token under the existing role-based user document.
-    // Firestore Rules must explicitly permit this write.
     const documentId = `${role}_${userId}`;
 
     await setDoc(
-      doc(db, "users", documentId, "fcmTokens", token),
+      doc(firebase.db, "users", documentId, "fcmTokens", token),
       {
         token,
         role,
@@ -112,7 +135,6 @@ async function enablePush() {
         const body =
           payload.notification?.body || "You have a new update.";
 
-        // Show an in-page alert while the website is open.
         alert(`${title}\n${body}`);
       });
 

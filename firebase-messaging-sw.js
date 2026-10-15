@@ -1,9 +1,8 @@
-
 importScripts(
-  "https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"
+  "https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"
 );
 importScripts(
-  "https://www.gstatic.com/firebasejs/10.13.2/firebase-messaging-compat.js"
+  "https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js"
 );
 
 firebase.initializeApp({
@@ -17,13 +16,12 @@ firebase.initializeApp({
 
 const messaging = firebase.messaging();
 
-// Optional: handle background data-only messages.
 messaging.onBackgroundMessage((payload) => {
   const title = payload.notification?.title || "College Permission";
-  const options = {
-    body: payload.notification?.body || "You have a new update.",
-    icon: "/icon-192.png"
-  };
+  const body = payload.notification?.body || "You have a new update.";
 
-  return self.registration.showNotification(title, options);
+  self.registration.showNotification(title, {
+    body,
+    icon: "/icon-192.png"
+  });
 });

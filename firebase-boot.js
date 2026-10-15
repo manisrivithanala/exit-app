@@ -1,150 +1,266 @@
-// ================================================================
-// 8. FCM PUSH NOTIFICATIONS
-// ================================================================
+
+/* ================================================================
+   firebase-boot.js
+   Firebase sync + real-time Firestore updates
+   FCM registration is handled separately in push.js
+================================================================ */
+
+import { initializeApp, getApps } from
+  "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 
 import {
-  getMessaging,
-  getToken,
-  onMessage
-} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging.js";
+  getFirestore,
+  collection,
+  doc,
+  getDocs,
+  setDoc,
+  deleteDoc,
+  onSnapshot
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
-const VAPID_KEY =
-  "BDiJmkevr_HPOjJdEQk9tySWP16bObFiQ8le8oOZVOQ7p89KzrPr_JYLLPz3VqJrErTfnWVH9HKpnCL9xtO4Pus";
+import {
+  getAuth,
+  signInAnonymously,
+  onAuthStateChanged
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
-let fcmInitialized = false;
-let foregroundListenerAdded = false;
+// 1. Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyCbLaMMyURD7j6l84qnbDi9Eaol9oABiVE",
+  authDomain: "student-permissions-web.firebaseapp.com",
+  projectId: "student-permissions-web",
+  storageBucket: "student-permissions-web.firebasestorage.app",
+  messagingSenderId: "717967595505",
+  appId: "1:717967595505:web:2c3cc66527b23a6b5c1650"
+};
 
-async function initFCM() {
-  if (fcmInitialized) return;
+// 2. Initialize Firebase
+const app = getApps().length
+  ? getApps()[0]
+  : initializeApp(firebaseConfig);
+
+const db = getFirestore(app);
+const auth = getAuth(app);
+
+// Make Firebase available to push.js
+window.CPS_FIREBASE = { app, db, auth };
+
+// 3. Collections synchronized with localStorage
+const SYNCED_KEYS = [
+  "cps_students",
+  "cps_teachers",
+  "cps_hods",
+  "cps_security",
+  "cps_permissions",
+  "cps_gateLog",
+  "cps_auditLog"
+];
+
+function keyToCollection(key) {
+  return key.replace("cps_", "");
+}
+
+// 4. Bootstrap Firestore data
+async function bootstrapFromFirestore() {
+  console.log("Firebase boot: loading data...");
 
   try {
-    if (!("Notification" in window) || !("serviceWorker" in navigator)) {
-      console.warn("This browser does not support web push notifications.");
-      return;
-    }
+    for (const key of SYNCED_KEYS) {
+      try {
+        const collectionName = keyToCollection(key);
+        const snapshot = await getDocs(
+          collection(db, collectionName)
+        );
 
-    // Verify the VAPID key contains only ASCII characters.
-    if (!/^[A-Za-z0-9_-]+$/.test(VAPID_KEY)) {
-      console.error(
-        "Invalid VAPID key. Copy the Web Push public key again from Firebase Console."
-      );
-      return;
-    }
+        const rows = snapshot.docs.map(document => ({
+          id: document.id,
+          ...document.data()
+        }));
 
-    const permission = await Notification.requestPermission();
-
-    if (permission !== "granted") {
-      console.warn("Notification permission was not granted.");
-      return;
-    }
-
-    const registration = await navigator.serviceWorker.register(
-      "/firebase-messaging-sw.js"
-    );
-
-    await navigator.serviceWorker.ready;
-
-    const messaging = getMessaging(app);
-
-    const token = await getToken(messaging, {
-      vapidKey: VAPID_KEY,
-      serviceWorkerRegistration: registration
-    });
-
-    if (!token) {
-      console.warn("FCM did not return a token.");
-      return;
-    }
-
-    window.CPS_FCM_TOKEN = token;
-    console.log("FCM token generated successfully.");
-
-    await saveFcmTokenToFirestore(token);
-
-    if (!foregroundListenerAdded) {
-      onMessage(messaging, (payload) => {
-        console.log("Foreground push received:", payload);
-
-        const title =
-          payload.notification?.title || "College Permission";
-
-        const body =
-          payload.notification?.body || "You have a new update.";
-
-        // Website is open: display a notification.
-        if (Notification.permission === "granted") {
-          new Notification(title, {
-            body,
-            icon: "/icon-192.png"
-          });
+        if (rows.length > 0 || !localStorage.getItem(key)) {
+          originalSetItem(key, JSON.stringify(rows));
         }
-      });
 
-      foregroundListenerAdded = true;
+        console.log(`${key}: ${rows.length} records loaded`);
+      } catch (error) {
+        console.warn(
+          `Could not load ${key}:`,
+          error.message
+        );
+      }
     }
 
-    fcmInitialized = true;
-    console.log("FCM initialization completed.");
+    window.CPS_BOOT_DONE = true;
+    window.dispatchEvent(new Event("cps-boot-ready"));
+
+    console.log("Firebase boot completed.");
+
+    startRealtimeListeners();
   } catch (error) {
-    console.error("FCM initialization failed:", error);
+    console.error("Firebase bootstrap failed:", error);
+    window.CPS_BOOT_DONE = true;
+    window.dispatchEvent(new Event("cps-boot-ready"));
   }
 }
 
-async function saveFcmTokenToFirestore(token) {
+// 5. Generate document ID
+function makeDocId(row) {
+  if (row.permissionId) return row.permissionId;
+  if (row.regNo) return row.regNo;
+  if (row.teacherId) return row.teacherId;
+  if (row.hodId) return row.hodId;
+  if (row.securityId) return row.securityId;
+
+  return (
+    "doc_" +
+    Math.random().toString(36).slice(2) +
+    Date.now().toString(36)
+  );
+}
+
+// 6. Push localStorage changes to Firestore
+let suppressRemoteUntil = 0;
+
+function suppressRemoteFor(milliseconds = 1200) {
+  suppressRemoteUntil = Date.now() + milliseconds;
+}
+
+async function pushToFirestore(key, value) {
   try {
-    const session = localStorage.getItem("cps_currentUser");
+    suppressRemoteFor();
 
-    if (!session) {
-      console.warn(
-        "FCM token generated, but no logged-in user was found. Call CPS_INIT_FCM after login."
-      );
-      return;
-    }
+    const collectionName = keyToCollection(key);
+    const rows = JSON.parse(value || "[]");
 
-    const user = JSON.parse(session);
-    const role = String(user.role || "").toLowerCase();
-
-    let userId = "";
-
-    if (role === "student") userId = user.regNo;
-    if (role === "teacher") userId = user.teacherId;
-    if (role === "hod") userId = user.hodId;
-    if (role === "security") userId = user.securityId;
-
-    if (!userId) {
-      console.warn("Could not identify the logged-in user.");
-      return;
-    }
-
-    const docId = `${role}_${userId}`;
-
-    await setDoc(
-      doc(db, "users", docId),
-      {
-        role,
-        userId,
-        fullName: user.fullName || "",
-        fcmToken: token,
-        tokenUpdatedAt: new Date().toISOString()
-      },
-      { merge: true }
+    const snapshot = await getDocs(
+      collection(db, collectionName)
     );
 
-    console.log("FCM token saved successfully for:", docId);
+    const existingIds = snapshot.docs.map(document => document.id);
+    const newIds = new Set();
+
+    for (const row of rows) {
+      const documentId = row.id || makeDocId(row);
+
+      newIds.add(documentId);
+
+      const { id, ...dataToSave } = row;
+
+      await setDoc(
+        doc(db, collectionName, documentId),
+        dataToSave,
+        { merge: true }
+      );
+    }
+
+    for (const existingId of existingIds) {
+      if (!newIds.has(existingId)) {
+        await deleteDoc(
+          doc(db, collectionName, existingId)
+        );
+      }
+    }
   } catch (error) {
-    console.error(
-      "Could not save FCM token. Check Firestore Rules:",
-      error
+    console.warn(
+      `Firestore sync failed for ${key}:`,
+      error.message
     );
   }
 }
 
-// Keep this function available so login code can call it.
-window.CPS_INIT_FCM = initFCM;
+// 7. Hook localStorage methods
+const originalSetItem = localStorage.setItem.bind(localStorage);
+const originalRemoveItem = localStorage.removeItem.bind(localStorage);
 
-// Initialize after the existing Firebase boot process.
-if (window.CPS_BOOT_DONE) {
-  initFCM();
-} else {
-  window.addEventListener("cps-boot-ready", initFCM, { once: true });
+localStorage.setItem = function (key, value) {
+  originalSetItem(key, value);
+
+  if (
+    SYNCED_KEYS.includes(key) &&
+    window.CPS_BOOT_DONE
+  ) {
+    pushToFirestore(key, value).catch(console.error);
+  }
+};
+
+localStorage.removeItem = function (key) {
+  originalRemoveItem(key);
+
+  if (
+    SYNCED_KEYS.includes(key) &&
+    window.CPS_BOOT_DONE
+  ) {
+    pushToFirestore(key, "[]").catch(console.error);
+  }
+};
+
+// 8. Real-time Firestore listeners
+let listenersStarted = false;
+
+function startRealtimeListeners() {
+  if (listenersStarted) return;
+
+  listenersStarted = true;
+
+  for (const key of SYNCED_KEYS) {
+    const collectionName = keyToCollection(key);
+
+    try {
+      onSnapshot(
+        collection(db, collectionName),
+        snapshot => {
+          if (Date.now() < suppressRemoteUntil) return;
+
+          const rows = snapshot.docs.map(document => ({
+            id: document.id,
+            ...document.data()
+          }));
+
+          const json = JSON.stringify(rows);
+          const current = localStorage.getItem(key) || "[]";
+
+          if (current !== json) {
+            originalSetItem(key, json);
+
+            window.dispatchEvent(
+              new CustomEvent("cps-data-updated", {
+                detail: {
+                  key,
+                  collectionName,
+                  count: rows.length
+                }
+              })
+            );
+          }
+        },
+        error => {
+          console.warn(
+            `Realtime listener failed for ${collectionName}:`,
+            error.message
+          );
+        }
+      );
+    } catch (error) {
+      console.warn(
+        `Could not start listener for ${collectionName}:`,
+        error.message
+      );
+    }
+  }
+
+  console.log("Firestore realtime listeners started.");
 }
+
+// 9. Authentication and boot sequence
+onAuthStateChanged(auth, async user => {
+  if (user) {
+    await bootstrapFromFirestore();
+  }
+});
+
+signInAnonymously(auth).catch(error => {
+  console.error("Anonymous authentication failed:", error);
+
+  window.CPS_BOOT_DONE = true;
+  window.dispatchEvent(new Event("cps-boot-ready"));
+});
