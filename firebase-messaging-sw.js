@@ -15,4 +15,15 @@ firebase.initializeApp({
   appId: "1:717967595505:web:2c3cc66527b23a6b5c1650"
 });
 
-firebase.messaging();
+const messaging = firebase.messaging();
+
+// Optional: handle background data-only messages.
+messaging.onBackgroundMessage((payload) => {
+  const title = payload.notification?.title || "College Permission";
+  const options = {
+    body: payload.notification?.body || "You have a new update.",
+    icon: "/icon-192.png"
+  };
+
+  return self.registration.showNotification(title, options);
+});

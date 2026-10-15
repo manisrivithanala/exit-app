@@ -1,88 +1,132 @@
-import { initializeApp, getApps } from
-  "https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js";
-
-import { getAuth } from
-  "https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js";
 
 import {
-  getFirestore, doc, setDoc, serverTimestamp
-} from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
+  getMessaging,
+  getToken,
+  isSupported,
+  onMessage
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging.js";
 
 import {
-  getMessaging, getToken, isSupported
-} from "https://www.gstatic.com/firebasejs/10.13.2/firebase-messaging.js";
+  doc,
+  setDoc,
+  serverTimestamp
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
-const firebaseConfig = {
-  apiKey: "AIzaSyCbLaMMyURD7j6l84qnbDi9Eaol9oABiVE",
-  authDomain: "student-permissions-web.firebaseapp.com",
-  projectId: "student-permissions-web",
-  storageBucket: "student-permissions-web.firebasestorage.app",
-  messagingSenderId: "717967595505",
-  appId: "1:717967595505:web:2c3cc66527b23a6b5c1650"
-};
+const VAPID_KEY =
+  "BDiJmkevr_HPOjJdEQk9tySWP16bObFiQ8le8oOZVOQ7p89KzrPr_JYLLPz3VqJrErTfnWVH9HKpnCL9xtO4Pus";
 
-const app = getApps().length
-  ? getApps()[0]
-  : initializeApp(firebaseConfig);
+let messaging = null;
+let messageListenerAdded = false;
 
-const auth = getAuth(app);
-const db = getFirestore(app);
+async function enablePush() {
+  try {
+    if (!window.CPS_FIREBASE) {
+      alert("Firebase is not ready. Refresh the page and try again.");
+      return;
+    }
 
-// Firebase Console లోని Web Push certificates నుంచి తీసుకున్న public VAPID key
-const VAPID_KEY = "BDiJmkevr_HPOjJdEQk9tySWP16bObFiQ8le8oOZVOQ7p89KzrPr_JYLLPz3VqJrErTfnWVH9HKpnCL9xtO4Pus";
+    if (!("Notification" in window) || !("serviceWorker" in navigator)) {
+      alert("This browser does not support push notifications.");
+      return;
+    }
+
+    if (!(await isSupported())) {
+      alert("Push notifications are not supported in this browser.");
+      return;
+    }
+
+    const sessionText = localStorage.getItem("cps_currentUser");
+
+    if (!sessionText) {
+      alert("Please log in first.");
+      return;
+    }
+
+    const user = JSON.parse(sessionText);
+    const role = String(user.role || "").toLowerCase();
+
+    let userId = "";
+
+    if (role === "student") userId = user.regNo;
+    if (role === "teacher") userId = user.teacherId;
+    if (role === "hod") userId = user.hodId;
+    if (role === "security") userId = user.securityId;
+
+    if (!userId) {
+      alert("Could not identify your logged-in account.");
+      return;
+    }
+
+    if (!/^[A-Za-z0-9_-]+$/.test(VAPID_KEY)) {
+      alert("Invalid VAPID key. Copy it again from Firebase Console.");
+      return;
+    }
+
+    const permission = await Notification.requestPermission();
+
+    if (permission !== "granted") {
+      alert("Please allow notifications in your browser settings.");
+      return;
+    }
+
+    const registration = await navigator.serviceWorker.register(
+      "/firebase-messaging-sw.js"
+    );
+
+    await navigator.serviceWorker.ready;
+
+    const { db } = window.CPS_FIREBASE;
+
+    messaging = getMessaging();
+
+    const token = await getToken(messaging, {
+      vapidKey: VAPID_KEY,
+      serviceWorkerRegistration: registration
+    });
+
+    if (!token) {
+      alert("Could not register this device.");
+      return;
+    }
+
+    // Store token under the existing role-based user document.
+    // Firestore Rules must explicitly permit this write.
+    const documentId = `${role}_${userId}`;
+
+    await setDoc(
+      doc(db, "users", documentId, "fcmTokens", token),
+      {
+        token,
+        role,
+        userId,
+        updatedAt: serverTimestamp()
+      },
+      { merge: true }
+    );
+
+    if (!messageListenerAdded) {
+      onMessage(messaging, (payload) => {
+        const title =
+          payload.notification?.title || "College Permission";
+
+        const body =
+          payload.notification?.body || "You have a new update.";
+
+        // Show an in-page alert while the website is open.
+        alert(`${title}\n${body}`);
+      });
+
+      messageListenerAdded = true;
+    }
+
+    alert("Push notifications enabled successfully!");
+  } catch (error) {
+    console.error("Push notification setup failed:", error);
+    alert(`Setup failed: ${error.message}`);
+  }
+}
 
 document.getElementById("enablePush")?.addEventListener(
   "click",
-  async () => {
-    try {
-      if (!(await isSupported())) {
-        alert("Push notifications are not supported.");
-        return;
-      }
-
-      if (!auth.currentUser) {
-        alert("Please log in first.");
-        return;
-      }
-
-      const permission = await Notification.requestPermission();
-
-      if (permission !== "granted") {
-        alert("Please allow notifications.");
-        return;
-      }
-
-      const registration =
-        await navigator.serviceWorker.register(
-          "/firebase-messaging-sw.js"
-        );
-
-      const messaging = getMessaging(app);
-
-      const token = await getToken(messaging, {
-        vapidKey: VAPID_KEY,
-        serviceWorkerRegistration: registration
-      });
-
-      if (!token) {
-        alert("Could not register this device.");
-        return;
-      }
-
-      const user = auth.currentUser;
-
-      await setDoc(
-        doc(db, "users", user.uid, "fcmTokens", token),
-        {
-          token,
-          updatedAt: serverTimestamp()
-        }
-      );
-
-      alert("Push notifications enabled!");
-    } catch (error) {
-      console.error(error);
-      alert("Setup failed. Check the browser console.");
-    }
-  }
+  enablePush
 );
